@@ -154,7 +154,7 @@ async def node_translate(state: AgentState) -> dict:
         )
 
     result = ParsedRecipeWithTranslations(
-        **parsed.model_dump(),
+        **parsed.model_dump(exclude={"steps"}),
         title_i18n={Language.PL: title_pl},
         description_i18n={Language.PL: description_pl} if description_pl else {},
         steps=translated_steps,
@@ -165,7 +165,7 @@ async def node_translate(state: AgentState) -> dict:
 
 
 
-    from langgraph.types import interrupt
+from langgraph.types import interrupt
 
 def node_human_review(state: AgentState) -> dict:
     parsed = state["parsed"]
@@ -206,7 +206,7 @@ def _build_summary(parsed: ParsedRecipeWithTranslations) -> str:
     return "\n".join(lines)
 
 
-    from recipe_agent.db.supabase import get_client, save_full_recipe
+from recipe_agent.db.supabase import get_client, save_full_recipe
 
 async def node_save(state: AgentState) -> dict:
     log.info("node.save.start")

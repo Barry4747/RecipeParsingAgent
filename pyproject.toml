@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "langchain-anthropic>=1.4.0",
+    "langchain-ollama>=1.0.1",
     "langgraph>=1.1.4",
     "pydantic-settings>=2.13.1",
     "python-dotenv>=1.2.2",
@@ -26,3 +27,9 @@ dev = [
 
 [project.scripts]
 recipe-agent = "recipe_agent.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
