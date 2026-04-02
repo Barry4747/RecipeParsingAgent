@@ -53,11 +53,13 @@ class StepIngredient(BaseModel):
     name: str
     amount: float | None = None
     unit: str | None = None
+    name_i18n: dict[Language, str] = Field(default_factory=dict)
 
 
 class StepItem(BaseModel):
     name: str
     tag: ItemTag
+    name_i18n: dict[Language, str] = Field(default_factory=dict)
 
 
 class RecipeStep(BaseModel):

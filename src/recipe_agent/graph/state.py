@@ -17,3 +17,5 @@ class AgentState(TypedDict):
 
     retry_count: int
     messages: Annotated[list, add_messages]
+
+    saved_recipe_id: str | None
