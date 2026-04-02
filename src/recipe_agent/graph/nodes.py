@@ -19,11 +19,20 @@ _llm = ChatOllama(
 
 _PARSE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """You are a culinary recipe parser. Extract structured data from recipe text.
-
+Split the recipe into short steps, each step should be a single action.
 Rules for steps:
-- step.ingredients = only ingredients PHYSICALLY ADDED in this step
+- step.ingredients = ingredients involved in this step. For each ingredient, you must fill the `actions` field. This is an ordered list of actions performed on the ingredient in this specific step.
+  Available actions:
+    * 'peel': peeling skin off (e.g., potatoes, apples).
+    * 'slice': cutting into slices or discs (e.g., onions, tomatoes).
+    * 'chop': cutting into chunks or pieces (e.g., vegetables, meat).
+    * 'mince': very fine chopping (e.g., garlic, herbs).
+    * 'grate': shredding using a grater (e.g., cheese, carrots).
+    * 'blend': processing until smooth (e.g., soups, smoothies).
+    * 'melt': melting a solid ingredient (e.g., butter, chocolate).
+    * 'add': physically adding the ingredient to the dish, pot, pan or bowl. IMPORTANT: If the ingredient is only being prepared (e.g., chopped) but NOT added to the main dish in this step, do NOT include 'add'.
 - step.items = only tools ACTIVELY USED (max 1 per tag per step)
-- "mix", "wait", "rest" steps usually have NO ingredients
+- "mix", "wait", "rest" steps usually have NO ingredients unless being added
 - Normalize ingredient names to lowercase
 
 Return valid JSON matching the schema exactly."""),
@@ -43,7 +52,11 @@ async def _parse_with_retry(text: str) -> ParsedRecipe:
     if result["parsing_error"]:
         raise ValueError(f"Schema mismatch: {result['parsing_error']}")
 
-    return result["parsed"]
+    parsed = result["parsed"]
+    if parsed is None:
+        raise ValueError("Model zwrócił None zamiast sparsowanego przepisu")
+
+    return parsed
 
 
 async def node_parse(state: AgentState) -> dict:
@@ -213,4 +226,19 @@ async def node_save(state: AgentState) -> dict:
     sb = get_client()
     recipe_id = await save_full_recipe(sb, state["parsed"])
     log.info("node.save.ok", recipe_id=recipe_id)
+    return {"saved_recipe_id": recipe_id}
+
+from recipe_agent.db.supabase import update_recipe_i18n, save_steps
+
+async def node_save_migration(state: AgentState) -> dict:
+    log.info("node.save_migration.start", recipe_id=state.get("recipe_id"))
+    sb = get_client()
+
+    recipe_id = state["recipe_id"]
+    parsed = state["parsed"]
+
+    await update_recipe_i18n(sb, recipe_id, parsed)
+    await save_steps(sb, recipe_id, parsed)
+
+    log.info("node.save_migration.ok", recipe_id=recipe_id)
     return {"saved_recipe_id": recipe_id}

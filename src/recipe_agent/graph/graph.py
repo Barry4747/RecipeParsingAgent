@@ -57,8 +57,6 @@ def build_graph() -> StateGraph:
 
     builder.add_edge("save", END)
 
-    # MemorySaver trzyma stan w pamięci — wystarczy dla CLI
-    # Przy produkcji zamień na SqliteSaver lub PostgresSaver
     checkpointer = MemorySaver()
     return builder.compile(
         checkpointer=checkpointer,
@@ -67,3 +65,40 @@ def build_graph() -> StateGraph:
 
 
 graph = build_graph()
+
+from recipe_agent.graph.nodes import node_save_migration
+
+def build_migration_graph() -> StateGraph:
+    builder = StateGraph(AgentState)
+
+    builder.add_node("parse", node_parse)
+    builder.add_node("translate", node_translate)
+    builder.add_node("human_review", node_human_review)
+    builder.add_node("save", node_save_migration)
+
+    builder.add_edge(START, "parse")
+
+    builder.add_conditional_edges("parse", route_after_parse, {
+        "translate": "translate",
+        "parse": "parse",
+        "end": END,
+    })
+
+    builder.add_edge("translate", "human_review")
+
+    builder.add_conditional_edges("human_review", route_after_review, {
+        "save": "save",
+        "parse": "parse",
+        "end": END,
+    })
+
+    builder.add_edge("save", END)
+
+    checkpointer = MemorySaver()
+    return builder.compile(
+        checkpointer=checkpointer,
+        interrupt_before=["human_review"],
+    )
+
+
+migration_graph = build_migration_graph()

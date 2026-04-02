@@ -36,7 +36,11 @@ async def run_recipe(raw_text: str, source_url: str | None = None) -> None:
             log.info("graph.node.done", node=node_name)
 
 
-async def _handle_interrupt(interrupt_data, config) -> None:
+async def _handle_interrupt(interrupt_data, config, graph=None) -> None:
+    if graph is None:
+        from recipe_agent.graph.graph import graph as default_graph
+        graph = default_graph
+
     payload = interrupt_data[0].value
 
     console.print(Panel(
@@ -64,6 +68,8 @@ async def _handle_interrupt(interrupt_data, config) -> None:
             if node_name == "save":
                 console.print(f"\n[bold green]Zapisano![/bold green]")
             log.info("graph.node.done", node=node_name)
+    
+    return decision
 
 
 async def main() -> None:

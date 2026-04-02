@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock, patch
 from recipe_agent.models import (
     ParsedRecipe, ParsedRecipeWithTranslations,
     RecipeIngredient, RecipeStep, StepIngredient, StepItem,
-    ItemTag, Language,
+    ItemTag, Language, IngredientAction,
 )
 
 
@@ -28,22 +28,22 @@ def sample_parsed_recipe() -> ParsedRecipe:
                 step_number=1,
                 instruction="Boil salted water and cook spaghetti until al dente",
                 duration_seconds=600,
-                ingredients=[StepIngredient(name="spaghetti", amount=400, unit="g")],
+                ingredients=[StepIngredient(name="spaghetti", amount=400, unit="g", actions=[IngredientAction.ADD])],
                 items=[StepItem(name="pot", tag=ItemTag.POT)],
             ),
             RecipeStep(
                 step_number=2,
                 instruction="Fry pancetta until crispy",
                 duration_seconds=300,
-                ingredients=[StepIngredient(name="pancetta", amount=150, unit="g")],
+                ingredients=[StepIngredient(name="pancetta", amount=150, unit="g", actions=[IngredientAction.ADD])],
                 items=[StepItem(name="frying pan", tag=ItemTag.PAN)],
             ),
             RecipeStep(
                 step_number=3,
                 instruction="Mix eggs with parmesan in a bowl",
                 ingredients=[
-                    StepIngredient(name="eggs", amount=4),
-                    StepIngredient(name="parmesan", amount=100, unit="g"),
+                    StepIngredient(name="eggs", amount=4, actions=[IngredientAction.ADD]),
+                    StepIngredient(name="parmesan", amount=100, unit="g", actions=[IngredientAction.GRATE, IngredientAction.ADD]),
                 ],
                 items=[StepItem(name="bowl", tag=ItemTag.BOWL)],
             ),

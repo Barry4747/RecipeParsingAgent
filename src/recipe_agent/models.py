@@ -24,6 +24,17 @@ class DifficultyLevel(StrEnum):
     HARD = "hard"
 
 
+class IngredientAction(StrEnum):
+    ADD = "add"
+    BLEND = "blend"
+    CHOP = "chop"
+    GRATE = "grate"
+    MELT = "melt"
+    MINCE = "mince"
+    PEEL = "peel"
+    SLICE = "slice"
+
+
 class IngredientBase(BaseModel):
     name: str
     default_unit: str | None = None
@@ -53,6 +64,7 @@ class StepIngredient(BaseModel):
     name: str
     amount: float | None = None
     unit: str | None = None
+    actions: list[IngredientAction] = Field(default_factory=list)
     name_i18n: dict[Language, str] = Field(default_factory=dict)
 
 
