@@ -1,12 +1,13 @@
+import sys
 import asyncio
 import structlog
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
 from langgraph.types import Command
-
+from recipe_agent.utils import AsyncRateLimiter
 from recipe_agent.graph.graph import graph
-from recipe_agent.logging import setup_logging
+from recipe_agent.log_config import setup_logging
 
 setup_logging(debug="--debug" in sys.argv)
 log = structlog.get_logger()
@@ -36,18 +37,34 @@ async def run_recipe(raw_text: str, source_url: str | None = None) -> None:
             log.info("graph.node.done", node=node_name)
 
 
-async def _handle_interrupt(interrupt_data, config, graph=None) -> None:
+async def _handle_interrupt(interrupt_data, config, graph=None) -> str:
     if graph is None:
         from recipe_agent.graph.graph import graph as default_graph
         graph = default_graph
 
-    payload = interrupt_data[0].value
+    # interrupt_data może być krotką, listą lub bezpośrednio obiektem
+    if isinstance(interrupt_data, (list, tuple)):
+        if len(interrupt_data) == 0:
+            # brak danych — pobierz stan z checkpointera
+            state = graph.get_state(config)
+            parsed = state.values.get("parsed")
+        else:
+            payload = interrupt_data[0].value
+            parsed = payload.get("parsed")
+    else:
+        payload = interrupt_data.value
+        parsed = payload.get("parsed")
 
-    console.print(Panel(
-        payload["summary"],
-        title="[bold cyan]Podgląd przepisu[/bold cyan]",
-        border_style="cyan",
-    ))
+    if parsed:
+        from recipe_agent.models import ParsedRecipeWithTranslations
+        if isinstance(parsed, dict):
+            parsed = ParsedRecipeWithTranslations(**parsed)
+        from recipe_agent.graph.nodes import _build_summary
+        console.print(Panel(
+            _build_summary(parsed),
+            title="[bold cyan]Podgląd przepisu[/bold cyan]",
+            border_style="cyan",
+        ))
 
     decision = Prompt.ask(
         "\nCo zrobić?",
@@ -57,7 +74,7 @@ async def _handle_interrupt(interrupt_data, config, graph=None) -> None:
 
     note = None
     if decision == "edit":
-        note = Prompt.ask("Opisz co poprawić (LLM spróbuje jeszcze raz)")
+        note = Prompt.ask("Opisz co poprawić")
 
     resume_value = {"action": decision, "note": note}
     async for event in graph.astream(
@@ -66,9 +83,8 @@ async def _handle_interrupt(interrupt_data, config, graph=None) -> None:
     ):
         for node_name, output in event.items():
             if node_name == "save":
-                console.print(f"\n[bold green]Zapisano![/bold green]")
-            log.info("graph.node.done", node=node_name)
-    
+                console.print(f"\n[bold green]Recipe saved![/bold green]")
+
     return decision
 
 

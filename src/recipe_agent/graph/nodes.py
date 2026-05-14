@@ -1,25 +1,33 @@
+import json
 import structlog
-from langchain_ollama import ChatOllama
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
-
+from pydantic import BaseModel, Field
 from recipe_agent.config import settings
-from recipe_agent.models import ParsedRecipe
+from recipe_agent.models import ParsedRecipe, ParsedRecipeWithTranslations, Language, RecipeStep
 from recipe_agent.graph.state import AgentState
 
 log = structlog.get_logger()
 
-_llm = ChatOllama(
-    base_url=settings.ollama_base_url,
-    model=settings.ollama_model,
+_llm = ChatGoogleGenerativeAI(
+    model="gemini-3.1-flash-lite-preview",
     temperature=0,
-    num_predict=4096,
-    num_ctx=8192,
+    api_key=settings.google_api_key,
 ).with_structured_output(ParsedRecipe, include_raw=True)
 
 _PARSE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """You are a culinary recipe parser. Extract structured data from recipe text.
-Split the recipe into short steps, each step should be a single action.
+
+CRITICAL INSTRUCTION - STEP SPLITTING:
+You MUST break down the original recipe text into VERY SHORT micro-steps. 
+Do NOT just copy original paragraphs. 1 Step = 1 Single Action!
+BAD example (do not do this): "Heat oven to 180C. Put oats and flour in a bowl. Melt butter."
+GOOD example:
+Step 1: "Heat oven to 180C."
+Step 2: "Put oats and flour in a bowl."
+Step 3: "Melt butter."
+
 Rules for steps:
 - step.ingredients = ingredients involved in this step. For each ingredient, you must fill the `actions` field. This is an ordered list of actions performed on the ingredient in this specific step.
   Available actions:
@@ -35,6 +43,23 @@ Rules for steps:
 - "mix", "wait", "rest" steps usually have NO ingredients unless being added
 - Normalize ingredient names to lowercase
 
+Tool tags — assign the CLOSEST match, default to "other" when unsure:
+- "bowl" -> bowl, mixing bowl, salad bowl
+- "pot" -> pot, saucepan, stockpot, Dutch oven
+- "pan" -> frying pan, skillet, wok, griddle
+- "cutlery" -> spoon, fork, spatula, whisk, ladle, tongs
+- "mixer" -> electric mixer, stand mixer, blender, food processor
+- "board" -> cutting board, chopping board
+- "knife" -> knife, chef's knife, paring knife
+- "other" -> oven, baking sheet, rolling pin, wire rack, grater, peeler, timer, pan (everything else)
+
+IMPORTANT: "baking sheet", "wire rack", "oven", "rolling pin" -> always "other"
+IMPORTANT: "bowl" -> always "bowl", never "mixer"
+
+Rules for ingredients list (recipe-level):
+- Only include ingredients that need to be PURCHASED
+- Do NOT include intermediate products created during cooking
+
 Return valid JSON matching the schema exactly."""),
     ("human", "{input}"),
 ])
@@ -49,10 +74,10 @@ async def _parse_with_retry(text: str) -> ParsedRecipe:
     chain = _PARSE_PROMPT | _llm
     result = await chain.ainvoke({"input": text})
 
-    if result["parsing_error"]:
+    if result.get("parsing_error"):
         raise ValueError(f"Schema mismatch: {result['parsing_error']}")
 
-    parsed = result["parsed"]
+    parsed = result.get("parsed")
     if parsed is None:
         raise ValueError("Model zwrócił None zamiast sparsowanego przepisu")
 
@@ -82,84 +107,71 @@ async def node_parse(state: AgentState) -> dict:
         }
 
 
-from recipe_agent.models import ParsedRecipeWithTranslations, Language, RecipeStep
+class TranslationResult(BaseModel):
+    title_pl: str
+    description_pl: str | None
+    steps_pl: list[str] = Field(description="Przetłumaczone kroki w tej samej kolejności co w oryginale")
+    ingredients_map: dict[str, str] = Field(description="Słownik: nazwa angielska -> nazwa polska (mianownik)")
+    items_map: dict[str, str] = Field(description="Słownik: nazwa angielska -> nazwa polska (mianownik)")
 
 _TRANSLATE_PROMPT = ChatPromptTemplate.from_messages([
     ("system", """You are a culinary translator specializing in Polish.
-Translate the given JSON fields from English to Polish.
-
+Translate the provided JSON data from English to Polish.
 Rules:
-- Keep culinary terms accurate (e.g. "fold" → "delikatnie wmieszaj", "sauté" → "podsmaż")
-- Ingredient names should be in nominative case (mianownik): "onion" → "cebula"
-- Tool names should be in nominative case: "frying pan" → "patelnia"
-- Keep quantities, units and proper nouns unchanged
-- Return only the translated strings, no explanations"""),
-    ("human", "{input}"),
+- Keep culinary terms accurate (e.g. "fold" -> "delikatnie wmieszaj")
+- Ingredient names MUST be in nominative case (mianownik): "onion" -> "cebula", "eggs" -> "jajka"
+- Tool names MUST be in nominative case: "frying pan" -> "patelnia"
+- Keep quantities and units unchanged
+- Return strictly the requested JSON structure."""),
+    ("human", "Translate this recipe data:\n{input_data}"),
 ])
 
-_translate_llm = ChatOllama(
-    base_url=settings.ollama_base_url,
-    model=settings.ollama_model,
+_translate_llm = ChatGoogleGenerativeAI(
+    model="gemini-3.1-flash-lite-preview",
     temperature=0.1,
-    num_predict=4096,
-    num_ctx=8192,
-)
-
-
-async def _translate_text(text: str) -> str:
-    chain = _TRANSLATE_PROMPT | _translate_llm
-    result = await chain.ainvoke({"input": text})
-    return result.content.strip()
-
+    api_key=settings.google_api_key,
+).with_structured_output(TranslationResult)
 
 async def node_translate(state: AgentState) -> dict:
     log.info("node.translate.start")
     parsed = state["parsed"]
 
     if parsed is None:
-        log.warning("node.translate.skip", reason="no parsed recipe")
         return {}
 
-    import asyncio
+    # Zbieramy wszystkie unikalne składniki i narzędzia do przetłumaczenia
+    unique_ingredients = list({ing.name for ing in parsed.ingredients} | {ing.name for step in parsed.steps for ing in step.ingredients})
+    unique_items = list({item.name for step in parsed.steps for item in step.items})
+    steps_en = [step.instruction for step in parsed.steps]
 
-    title_pl, description_pl = await asyncio.gather(
-        _translate_text(parsed.title),
-        _translate_text(parsed.description) if parsed.description else asyncio.sleep(0, result=None),
-    )
-    step_instructions_pl = await asyncio.gather(*[
-        _translate_text(step.instruction)
-        for step in parsed.steps
-    ])
-    unique_ingredients = list({ing.name for ing in parsed.ingredients})
-    translated_ingredients = await asyncio.gather(*[
-        _translate_text(name) for name in unique_ingredients
-    ])
-    ingredient_map = dict(zip(unique_ingredients, translated_ingredients))
+    # Budujemy paczkę (JSON) dla modelu
+    payload = {
+        "title": parsed.title,
+        "description": parsed.description or "",
+        "steps": steps_en,
+        "ingredients_to_translate": unique_ingredients,
+        "items_to_translate": unique_items
+    }
 
-    unique_items = list({
-        item.name
-        for step in parsed.steps
-        for item in step.items
-    })
-    translated_items = await asyncio.gather(*[
-        _translate_text(name) for name in unique_items
-    ])
-    item_map = dict(zip(unique_items, translated_items))
+    # Wywołujemy model RAZ
+    chain = _TRANSLATE_PROMPT | _translate_llm
+    translations: TranslationResult = await chain.ainvoke({"input_data": json.dumps(payload)})
 
+    # Składamy wszystko z powrotem do ParsedRecipeWithTranslations
     translated_steps = []
-    for step, instruction_pl in zip(parsed.steps, step_instructions_pl):
+    for step, instruction_pl in zip(parsed.steps, translations.steps_pl):
         translated_steps.append(
             step.model_copy(update={
                 "instruction_i18n": {Language.PL: instruction_pl},
                 "ingredients": [
                     ing.model_copy(update={
-                        "name_i18n": {Language.PL: ingredient_map[ing.name]}
+                        "name_i18n": {Language.PL: translations.ingredients_map.get(ing.name, ing.name)}
                     }) if hasattr(ing, "name_i18n") else ing
                     for ing in step.ingredients
                 ],
                 "items": [
                     item.model_copy(update={
-                        "name_i18n": {Language.PL: item_map[item.name]}
+                        "name_i18n": {Language.PL: translations.items_map.get(item.name, item.name)}
                     }) if hasattr(item, "name_i18n") else item
                     for item in step.items
                 ],
@@ -168,14 +180,13 @@ async def node_translate(state: AgentState) -> dict:
 
     result = ParsedRecipeWithTranslations(
         **parsed.model_dump(exclude={"steps"}),
-        title_i18n={Language.PL: title_pl},
-        description_i18n={Language.PL: description_pl} if description_pl else {},
+        title_i18n={Language.PL: translations.title_pl},
+        description_i18n={Language.PL: translations.description_pl} if translations.description_pl else {},
         steps=translated_steps,
     )
 
-    log.info("node.translate.ok", title_pl=title_pl)
+    log.info("node.translate.ok", title_pl=translations.title_pl)
     return {"parsed": result}
-
 
 
 from langgraph.types import interrupt
@@ -200,7 +211,6 @@ def node_human_review(state: AgentState) -> dict:
 def _build_summary(parsed: ParsedRecipeWithTranslations) -> str:
     lines = [
         f"TYTUŁ:    {parsed.title}",
-        f"          {parsed.title_i18n.get('pl', '—')}",
         f"TRUDNOŚĆ: {parsed.difficulty_level or '—'}",
         f"CZAS:     {parsed.duration_minutes or '—'} min",
         f"KROKÓW:   {len(parsed.steps)}",
@@ -209,10 +219,7 @@ def _build_summary(parsed: ParsedRecipeWithTranslations) -> str:
         "KROKI:",
     ]
     for step in parsed.steps:
-        pl = step.instruction_i18n.get("pl", "")
         lines.append(f"  {step.step_number}. {step.instruction}")
-        if pl:
-            lines.append(f"     ↳ {pl}")
         if step.ingredients:
             names = ", ".join(i.name for i in step.ingredients)
             lines.append(f"     + {names}")

@@ -19,7 +19,7 @@ def get_client() -> Client:
 async def upsert_ingredient(sb: Client, name: str, default_unit: str | None, name_i18n: dict) -> str:
     result = sb.table("ingredients").upsert(
         {"name": name, "default_unit": default_unit, "name_i18n": name_i18n},
-        on_conflict="name",
+        on_conflict="name", returning="representation"
     ).execute()
     return result.data[0]["id"]
 
@@ -27,7 +27,7 @@ async def upsert_ingredient(sb: Client, name: str, default_unit: str | None, nam
 async def upsert_item(sb: Client, name: str, tag: str, name_i18n: dict) -> str:
     result = sb.table("items").upsert(
         {"name": name, "tag": tag, "name_i18n": name_i18n},
-        on_conflict="name",
+        on_conflict="name", returning="representation"
     ).execute()
     return result.data[0]["id"]
 
@@ -48,7 +48,7 @@ async def save_full_recipe(sb: Client, parsed: ParsedRecipeWithTranslations) -> 
         "source_url": parsed.source_url,
         "image_url": parsed.image_url,
         "youtube_url": parsed.youtube_url,
-    }).execute()
+    }, returning="representation").execute()
     recipe_id = recipe_row.data[0]["id"]
 
     for sort_order, ing in enumerate(parsed.ingredients):
@@ -71,7 +71,7 @@ async def save_full_recipe(sb: Client, parsed: ParsedRecipeWithTranslations) -> 
             "instruction": step.instruction,
             "instruction_i18n": step.instruction_i18n,
             "duration_seconds": step.duration_seconds,
-        }).execute()
+        }, returning="representation").execute()
         step_id = step_row.data[0]["id"]
 
         for ing in step.ingredients:
@@ -101,14 +101,10 @@ async def save_full_recipe(sb: Client, parsed: ParsedRecipeWithTranslations) -> 
     return recipe_id
 
 
-async def update_recipe_i18n(
-    sb: Client,
-    recipe_id: str,
-    parsed: ParsedRecipeWithTranslations,
-) -> None:
+async def update_recipe_i18n(sb: Client, recipe_id: str, parsed) -> None:
     sb.table("recipes").update({
-        "title_i18n": parsed.title_i18n,
-        "description_i18n": parsed.description_i18n,
+        "title_i18n": getattr(parsed, "title_i18n", {}),
+        "description_i18n": getattr(parsed, "description_i18n", {}),
     }).eq("id", recipe_id).execute()
     log.info("db.update_recipe_i18n.ok", recipe_id=recipe_id)
 
@@ -121,14 +117,17 @@ async def save_steps(
     log.info("db.save_steps.start", recipe_id=recipe_id, steps=len(parsed.steps))
 
     try:
-        for step in parsed.steps:
+        # Ensure idempotency by clearing existing steps for this recipe
+        sb.table("recipe_steps").delete().eq("recipe_id", recipe_id).execute()
+
+        for index, step in enumerate(parsed.steps, start=1):
             step_row = sb.table("recipe_steps").insert({
                 "recipe_id": recipe_id,
-                "step_number": step.step_number,
+                "step_number": index,
                 "instruction": step.instruction,
                 "instruction_i18n": step.instruction_i18n,
                 "duration_seconds": step.duration_seconds,
-            }).execute()
+            }, returning="representation").execute()
             step_id = step_row.data[0]["id"]
 
             for ing in step.ingredients:
@@ -148,7 +147,7 @@ async def save_steps(
                     "item_id": item_id,
                 }).execute()
     except Exception as e:
-        log.error("db.save_steps.error", error=str(e), recipe_id=recipe_id)
+        log.error("db.save_steps.rollback", error=str(e), recipe_id=recipe_id, exc_info=True)
         sb.table("recipe_steps").delete().eq("recipe_id", recipe_id).execute()
         raise
 

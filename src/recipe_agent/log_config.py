@@ -9,7 +9,5 @@ def setup_logging(debug: bool = False) -> None:
             structlog.processors.TimeStamper(fmt="%H:%M:%S", utc=False),
             structlog.dev.ConsoleRenderer(colors=True),
         ],
-        wrapper_class=structlog.make_filtering_bound_logger(
-            10 if debug else 20
-        ),
+        wrapper_class=structlog.make_filtering_bound_logger(10 if debug else 20),
     )

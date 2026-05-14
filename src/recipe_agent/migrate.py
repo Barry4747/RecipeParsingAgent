@@ -3,11 +3,11 @@ import structlog
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
 from langgraph.types import Command
-
+from recipe_agent.utils import AsyncRateLimiter
 from recipe_agent.config import settings
 from recipe_agent.db.supabase import get_client
 from recipe_agent.graph.graph import migration_graph
-from recipe_agent.logging import setup_logging
+from recipe_agent.log_config import setup_logging
 from recipe_agent.main import _handle_interrupt
 
 log = structlog.get_logger()
@@ -15,14 +15,25 @@ console = Console()
 
 
 async def fetch_pending(sb) -> list[dict]:
+    # 1. Pobieramy stare przepisy (ich jest 500, więc jedno zapytanie wystarczy)
     all_old = sb.table("recipes_old").select(
         "id, title, recipe_plaintext, description, category, area, duration_minutes, difficulty_level"
-    ).limit(100000).execute().data
+    ).execute().data
 
-    done_ids = {
-        str(r["recipe_id"])
-        for r in sb.table("recipe_steps").select("recipe_id").limit(100000).execute().data
-    }
+    done_ids = set()
+    offset = 0
+    page_size = 1000
+
+    while True:
+        res = sb.table("recipe_steps").select("recipe_id").order("id").range(offset, offset + page_size - 1).execute()
+        
+        if not res.data:
+            break 
+            
+        for r in res.data:
+            done_ids.add(str(r["recipe_id"]))
+            
+        offset += page_size
 
     pending = [r for r in all_old if str(r["id"]) not in done_ids]
     log.info("migrate.pending", total=len(all_old), pending=len(pending), done=len(done_ids))
@@ -60,6 +71,8 @@ async def run_migration(batch_size: int = 0, auto_save: bool = False) -> None:
 
     ok = skipped = failed = 0
 
+    rate_limiter = AsyncRateLimiter(max_calls=7, period=60.0)
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -70,6 +83,9 @@ async def run_migration(batch_size: int = 0, auto_save: bool = False) -> None:
         task = progress.add_task("Migracja...", total=len(to_process))
 
         for recipe in to_process:
+
+            await rate_limiter.acquire()
+            
             structlog.contextvars.bind_contextvars(recipe_title=recipe["title"])
             progress.update(task, description=f"[cyan]{recipe['title'][:50]}[/cyan]")
 
@@ -108,7 +124,9 @@ async def run_migration(batch_size: int = 0, auto_save: bool = False) -> None:
                                     skipped += 1
 
             except Exception as e:
-                log.error("migrate.recipe.failed", error=str(e))
+                import traceback
+                log.error("migrate.recipe.failed", error=str(e), recipe_title=recipe["title"])
+                console.print(traceback.format_exc())
                 failed += 1
 
             structlog.contextvars.clear_contextvars()

@@ -84,13 +84,13 @@ def build_migration_graph() -> StateGraph:
         "end": END,
     })
 
-    builder.add_edge("translate", "human_review")
-
     builder.add_conditional_edges("human_review", route_after_review, {
         "save": "save",
         "parse": "parse",
         "end": END,
     })
+
+    builder.add_edge("translate", "human_review")
 
     builder.add_edge("save", END)
 
